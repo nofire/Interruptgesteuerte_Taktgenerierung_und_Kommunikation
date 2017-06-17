@@ -198,11 +198,10 @@ void emain(void* arg) {
 
 #ifdef V3_Aufgabe_2_und_3
 #include "user_conf.h"
-#define MAX_MESSAGE_SIZE 100
 #define LEN 300
 #define COM_SIGNAl_PIN				0		// Pin ueber den der Interrupts ausgeloest wird
 #define COM_DATA_IN_REGISTER		IN0		// Register ueber den das Byte eingelesen wird
-#define MAX_MESSAGE_SIZE			8		// Maximale Laenge einer Nachricht
+#define MAX_MESSAGE_SIZE			100		// Maximale Laenge einer Nachricht
 #define STARTBYTE					0x23	// Wert des Start-Bytes
 #define ENDBYTE						0    	// Wert des Ende-Bytes
 
@@ -221,15 +220,14 @@ void ISR_EXT_INT0(){
     USHORT hilfe = 0;
     UCHAR buf;
 
-    buf=(USHORT) (io_in8(SPDR2) & 0x00FF);                                              // Einlesen des Datenbytes in Slave
+    buf=(UCHAR) (io_in8(SPDR2) & 0x00FF);                                               // Einlesen des Datenbytes in Slave
 
 
     steuerungsfunktion(buf, &byte_counter, &(nachricht[0]), &flag_ready, &comstate);    // Aufruf der Steuerungsfunktion
 
+    hilfe = io_in8(SPSR2) & (~(1<<SPIF2));                                              // Zureucksetzen des Interrupt-Flags
 
-    hilfe = io_in16(SPSR2) & ~(~(1<<SPIF2));                                       // Zureucksetzen des Interrupt-Flags
-
-    io_out16(SPSR2, hilfe);
+    io_out8(SPSR2, hilfe);
     return;
 }
 
@@ -246,7 +244,6 @@ void steuerungsfunktion(UCHAR byte_received, ULONG* byte_zaehler, UCHAR* empfang
                 *byte_zaehler=0;                                    // Etwas tun am Uebergang.
                 empfangene_nachricht[*byte_zaehler]=byte_received;
                 *byte_zaehler=*byte_zaehler+1;
-
                 *state = warte_auf_end_byte;                        // Zustandswechsel
 
             }
@@ -270,7 +267,6 @@ void steuerungsfunktion(UCHAR byte_received, ULONG* byte_zaehler, UCHAR* empfang
                 *byte_zaehler=0;
                 empfangene_nachricht[*byte_zaehler]=byte_received;
                 *byte_zaehler=*byte_zaehler+1;
-
                 *state = warte_auf_end_byte;                        // Ist ueberfluessing dient aber hoffentlich
                                                                     // dem Verstaendnis
             }
@@ -279,9 +275,7 @@ void steuerungsfunktion(UCHAR byte_received, ULONG* byte_zaehler, UCHAR* empfang
                 && (*byte_zaehler < MAX_MESSAGE_SIZE-1)) {
                 empfangene_nachricht[*byte_zaehler]=byte_received;
                 *byte_zaehler=*byte_zaehler+1;
-
                 *state = warte_auf_end_byte;
-
             }
 
             break;
@@ -300,14 +294,10 @@ uhrzeit     akt_zeit, hoch_zeit, runter_zeit;
 
 
 
-void init_spi1(){                           // emain-sender Sender SPI-Master
+void init_spi1(){                                                                   // emain-sender Sender SPI-Master
 
-    // SPI ist Master, clock rate = 1/4,
-    io_out8(SPCR1, 0);
+    io_out8(SPCR1, 0);                                                              // SPI ist Master, clock rate = 1/4,
     io_out8(SPCR1, ((1<<SPE1) | (1<<MSTR1)));
-
-
-
 }
 
 
@@ -368,12 +358,23 @@ void emain_sender(void* arg){
      init_spi1();
 
      while(1) {
-         i=0;
-            io_out8(SPDR1, io_in8(SPCR1) & (~(1<<notSS1)));
+         i = 0;
          do{
-            if(i<8){ io_out8(SPDR1, parametriere_akt_zeit[i]);}     // Ein ASCII-Zeichen versenden
-             ms_wait(10);
-             io_out8(SPDR1, io_in8(SPCR1) & ((1<<notSS1)));
+            io_out8(SPCR1, io_in8(SPCR1) & (~(1<<notSS1)));
+
+            for(; i<=8; i++){ // Ein ASCII-Zeichen versenden
+                io_out8(SPDR1, parametriere_akt_zeit[i]);
+            }
+            for(; i<=8; i++){ // Ein ASCII-Zeichen versenden
+                io_out8(SPDR1, parametriere_hoch_zeit[i]);
+            }
+            for(; i<=8; i++){ // Ein ASCII-Zeichen versenden
+                io_out8(SPDR1, parametriere_runter_zeit[i]);
+            }
+
+             ms_wait(100);
+
+             io_out8(SPCR1,(io_in8(SPCR1) | (1<<notSS1)));
 
              i++;
 
