@@ -1,8 +1,8 @@
 #include "simuc.h"
 
 ///////////////////////////////////////////////////////////////////////////////////////
-#define V3_Aufgabe_1
-//#define V3_Aufgabe_2_und_3
+//#define V3_Aufgabe_1
+#define V3_Aufgabe_2_und_3
 //#define nachrichtenempfang_ueber_ports
 ///////////////////////////////////////////////////////////////////////////////////////
 
@@ -203,8 +203,8 @@ void emain(void* arg) {
 #define COM_SIGNAl_PIN				0		// Pin ueber den der Interrupts ausgeloest wird
 #define COM_DATA_IN_REGISTER		IN0		// Register ueber den das Byte eingelesen wird
 #define MAX_MESSAGE_SIZE			8		// Maximale Laenge einer Nachricht
-#define STARTBYTE					0xFE	// Wert des Start-Bytes
-#define ENDBYTE						0xEF	// Wert des Ende-Bytes
+#define STARTBYTE					0x23	// Wert des Start-Bytes
+#define ENDBYTE						0    	// Wert des Ende-Bytes
 
 
 typedef struct {UCHAR hh, mm, ss;} uhrzeit;
@@ -217,13 +217,82 @@ STATE_N		comstate=warte_auf_start_byte;
 ULONG       byte_counter;
 
 
+void ISR_EXT_INT0(){
+    USHORT hilfe = 0;
+    UCHAR buf;
+
+    buf=(USHORT) (io_in8(SPDR2) & 0x00FF);                                              // Einlesen des Datenbytes in Slave
+
+
+    steuerungsfunktion(buf, &byte_counter, &(nachricht[0]), &flag_ready, &comstate);    // Aufruf der Steuerungsfunktion
+
+
+    hilfe = io_in16(SPSR2) & ~(~(1<<SPIF2));                                       // Zureucksetzen des Interrupt-Flags
+
+    io_out16(SPSR2, hilfe);
+    return;
+}
+
+
+
+
+void steuerungsfunktion(UCHAR byte_received, ULONG* byte_zaehler, UCHAR* empfangene_nachricht, UCHAR* ready, STATE_N* state){
+
+    switch (*state) {
+
+        case warte_auf_start_byte:
+
+            if ( byte_received == STARTBYTE) {                      // Uebergang nach warte_auf_end_byte
+                *byte_zaehler=0;                                    // Etwas tun am Uebergang.
+                empfangene_nachricht[*byte_zaehler]=byte_received;
+                *byte_zaehler=*byte_zaehler+1;
+
+                *state = warte_auf_end_byte;                        // Zustandswechsel
+
+            }
+            break;
+
+        case warte_auf_end_byte:
+            if (byte_received == ENDBYTE)  {                        // Uebergang nach warte_auf_start_byte
+
+                empfangene_nachricht[*byte_zaehler]=byte_received;
+                *byte_zaehler=*byte_zaehler+1;
+                *ready=1;
+                *state = warte_auf_start_byte;
+
+            }
+
+            if (*byte_zaehler == MAX_MESSAGE_SIZE-1) {
+                    *state = warte_auf_start_byte;                  // Die Nachricht ist zu lang und kann daher nicht gueltig sein!
+            }
+
+            if (byte_received == STARTBYTE) {                       // Uebergang auf sich selbst nur damit etwas getan wird.
+                *byte_zaehler=0;
+                empfangene_nachricht[*byte_zaehler]=byte_received;
+                *byte_zaehler=*byte_zaehler+1;
+
+                *state = warte_auf_end_byte;                        // Ist ueberfluessing dient aber hoffentlich
+                                                                    // dem Verstaendnis
+            }
+
+            if ((byte_received != STARTBYTE) && (byte_received != ENDBYTE)
+                && (*byte_zaehler < MAX_MESSAGE_SIZE-1)) {
+                empfangene_nachricht[*byte_zaehler]=byte_received;
+                *byte_zaehler=*byte_zaehler+1;
+
+                *state = warte_auf_end_byte;
+
+            }
+
+            break;
+
+        default:    *state = warte_auf_start_byte;
+    }
+}
 
 void do_param(UCHAR* auszuwertende_nachricht, uhrzeit* akt, uhrzeit* hoch, uhrzeit* runter){
 
-
-
 }
-
 
 
 UCHAR		byte_received, nachricht[MAX_MESSAGE_SIZE], flag_ready;
@@ -231,42 +300,11 @@ uhrzeit     akt_zeit, hoch_zeit, runter_zeit;
 
 
 
+void init_spi1(){                           // emain-sender Sender SPI-Master
 
-void init_spi1(){       // emain-sender Sender SPI-Master
-
-
-    // SS-Leitung durch Anwendersoftware auf 0 setzen
-
-    USHORT SS1 = '0';
-    SS1 = SPI1;
-
-    // Schreiben eines Bytes in das SPID SPI-Datenregister
-
-    // Hardware schiebt acht Bits vom Master zum Slave
-
-    // Nachdem ein Byte geschoben wurde stoppt der SPI-Taktgenerator
-
-    // Übertragungsende-Flags SPIF setzen
-
-    // Wenn das SPI-Interrupt-Enabl-Bit SPIE im SPCR Register gesetzt ist,
-       // so wird ein Interrupt ausgelöst
-
-    // Kann nur weitere Bytes eines Paketes übertragen indem er diese nach und
-     // nach in das SPDR-Register schreibt
-
-    // Ende eines Paketes: SS-Leitung auf 1 setzen
-
-
-
-    // Zu sendenden Daten der jeweiligen Schieberegister vorbereiten
-
-    // Taktimpulse auf der SCK-Leitung erzeugen um Datentransfer zu vollziehen
-
-    // Die Daten werden vom Master zum Slave über die MOSI-Leitung übertragen
-
-    // Synchronisieren Slave-Select-Leitung auf 1 setzen
-
-    // Start: Kommunikation
+    // SPI ist Master, clock rate = 1/4,
+    io_out8(SPCR1, 0);
+    io_out8(SPCR1, ((1<<SPE1) | (1<<MSTR1)));
 
 
 
@@ -275,14 +313,29 @@ void init_spi1(){       // emain-sender Sender SPI-Master
 
 void emain(void* arg){
     char string[LEN];
-
+    USHORT buf;
     INIT_BM_WITH_REGISTER_UI;
 
+    init_spi2();
+
+    // Zur Sicherheit vor Initialisierung den Interrupt des PIC generell deaktivieren
+        buf = io_in16(PICC);
+        buf = buf &  ~(1 << PICE);
+        io_out16(PICC, buf);
+
+        // Registrieren der ISRs in der Interupt-Vektor-Tabelle
+        setInterruptHandler(IVN_SPI2, ISR_EXT_INT0);
+
+        // Interrupt des PIV jetzt zulassen.
+        buf = buf | (1 << PICE);
+        io_out16(PICC, buf);
+
     while(1) {
+
 #ifndef USER_PROG_2
         putstring("Sie haben USER_PROG_2 nicht definiert\n");
 #endif
-        if(flag_ready==1){
+        if (flag_ready==1){
             putstring((char*)nachricht);
             putstring("\n");
 
@@ -291,7 +344,6 @@ void emain(void* arg){
             flag_ready=0;
         }
     }
-
 }
 
 
@@ -299,38 +351,29 @@ void emain(void* arg){
 //################AB HIER STEHT ALLES FUER DAS SENDER-PROGRAMM #################################################
 
 
-void init_spi2(UCHAR byte_received, ULONG* byte_zaehler, UCHAR* empfangene_nachricht, UCHAR* ready, STATE_N* state){ //emain Empfänger SPI-Slave
+void init_spi2(){ //emain Empfänger SPI-Slave
 
-
-
-
-    if(buf == MAX_MESSAGE_SIZE){
-
-
-
-
-         }
-     else if (buf != MAX_MESSAGE_SIZE){
-
-            putstring("Fehler: 8-Bit Übertragungszyklus konnte nicht abgeschlossen werden.");
-
-        }
+//SPI ist Slave
+    io_out8(SPCR2, 0);
+    io_out8(SPCR2, ((1<<SPE2) | (1<<SPIE2)));
 }
-       // SPI2 = SPCR2; SPI2 = SPR21; SPI2 = INV_SPI2; //SPI2 konfigurieren
 
 
 void emain_sender(void* arg){
-     UCHAR i, parametriere_akt_zeit   [] = "#A000005",
-              parametriere_hoch_zeit  [] = "#B000105",
-              parametriere_runter_zeit[] = "#C000159";
+     UCHAR i;
+     UCHAR parametriere_akt_zeit   [] = "#A000005";
+     UCHAR parametriere_hoch_zeit  [] = "#B000105";
+     UCHAR parametriere_runter_zeit[] = "#C000159";
 
+     init_spi1();
 
      while(1) {
          i=0;
-         do  {
-
-
+            io_out8(SPDR1, io_in8(SPCR1) & (~(1<<notSS1)));
+         do{
+            if(i<8){ io_out8(SPDR1, parametriere_akt_zeit[i]);}     // Ein ASCII-Zeichen versenden
              ms_wait(10);
+             io_out8(SPDR1, io_in8(SPCR1) & ((1<<notSS1)));
 
              i++;
 
@@ -343,151 +386,3 @@ void emain_sender(void* arg){
 
 #endif //V3_Aufgabe_2_und_3
 
-
- #ifdef nachrichtenempfang_ueber_ports
-// Sinnvoll zu nutzende Makros
-#define COM_SIGNAl_PIN				0		// Pin ueber den der Interrupts ausgeloest wird
-#define COM_DATA_IN_REGISTER		IN0		// Register ueber den das Byte eingelesen wird
-#define MAX_MESSAGE_SIZE			100		// Maximale Laenge einer Nachricht
-#define STARTBYTE					0xFE	// Wert des Start-Bytes
-#define ENDBYTE						0xEF	// Wert des Ende-Bytes
-
-
-typedef enum {warte_auf_start_byte, warte_auf_end_byte} STATE_N;
-
-
-// Globale Variablen fuer die ISR
-unsigned char		nachricht[MAX_MESSAGE_SIZE];
-unsigned char		flag_ready;
-STATE_N				comstate=warte_auf_start_byte;
-unsigned long int	byte_counter;
-
-
-
-void init_gpio_0_1()
-{
-    unsigned short hilfe = 0;
-
-    // ### PORT 1
-    // Interrupt fuer Bit 0 von PORT1 enable
-    hilfe = io_in16(EIE1) | (1 << COM_SIGNAl_PIN);
-    io_out16(EIE1, hilfe);
-
-    // Das Bit 0 von PORT 1 ist Eingang
-    hilfe = io_in16(DIR1) & ~(1 << COM_SIGNAl_PIN);
-    io_out16(DIR1, hilfe);
-
-
-    // ### PORT 0
-    // Die unter 8 Bit von PORT0 sind Eingang
-    hilfe = io_in16(DIR0) & 0xFF00;
-
-    io_out16(DIR1, hilfe);
-
-}
-
-
-void steuerungsfunktion(UCHAR byte_received, ULONG* byte_zaehler, UCHAR* empfangene_nachricht, UCHAR* ready, STATE_N* state){
-
-    switch (*state) {
-
-        case warte_auf_start_byte:
-
-            if ( byte_received == STARTBYTE) {              // Uebergang nach warte_auf_end_byte
-                *byte_zaehler=0;                            // Etwas tun am Uebergang.
-                empfangene_nachricht[*byte_zaehler]=byte_received;
-                *byte_zaehler=*byte_zaehler+1;
-
-                    *state = warte_auf_end_byte;                    // Zustandswechsel
-
-            }
-            break;
-
-        case warte_auf_end_byte:
-            if (byte_received == ENDBYTE)  {                     // Uebergang nach warte_auf_start_byte
-
-                empfangene_nachricht[*byte_zaehler]=byte_received;
-                *byte_zaehler=*byte_zaehler+1;
-
-                *ready=1;
-
-                    *state = warte_auf_start_byte;
-
-            }
-
-            if (*byte_zaehler == MAX_MESSAGE_SIZE-1) {
-                    *state = warte_auf_start_byte;                  // Die Nachricht ist zu lang und kann dahr nicht gueltig sein!
-
-            }
-
-            if (byte_received == STARTBYTE) {                   // Uebergang auf sich selbst nur damit etwas getan wird.
-                *byte_zaehler=0;
-                empfangene_nachricht[*byte_zaehler]=byte_received;
-                *byte_zaehler=*byte_zaehler+1;
-
-                // Zustandwechsel
-                    *state = warte_auf_end_byte;	// Ist ueberfluessing dient aber hoffentlich
-                                                // dem Verstaendnis
-            }
-
-            if ((byte_received != STARTBYTE) && (byte_received != ENDBYTE)
-                && (*byte_zaehler < MAX_MESSAGE_SIZE-1)) {
-                empfangene_nachricht[*byte_zaehler]=byte_received;
-                *byte_zaehler=*byte_zaehler+1;
-
-                    *state = warte_auf_end_byte;
-
-            }
-
-            break;
-
-        default:    *state = warte_auf_start_byte;
-    }
-
-}
-
-
-
-void ISR_EXT_INT0()
-{
-    unsigned short int hilfe = 0;
-    unsigned char buf;
-
-    buf=(unsigned char) (io_in16(COM_DATA_IN_REGISTER) & 0x00FF);                       // Einlesen des Datenbytes
-
-
-    steuerungsfunktion(buf, &byte_counter, &(nachricht[0]), &flag_ready, &comstate);    // Aufruf der Steuerungsfunktion
-
-
-    hilfe = io_in16(EIF1) & ~(1<<COM_SIGNAl_PIN);                                       // Zureucksetzen des Interrupt-Flags
-
-    io_out16(EIF1, hilfe);
-    return;
-}
-
-
-void emain(void* arg)
-{
-     unsigned short int buf;
-
-     INIT_REGISTER_UI_WITHOUT_BM
-
-     buf = io_in16(PICC);                                // Zur Sicherheit vor Initialisierung den Interrupt des PIC generell deaktivieren
-
-     buf = buf &  ~(1 << PICE);
-     io_out16(PICC, buf);
-
-     init_gpio_0_1();                                    // Initialisieren der Ports
-     setInterruptHandler(IVN_EI100, ISR_EXT_INT0);       // Registrieren der ISRs in der Interupt-Vektor-Tabelle
-
-
-     buf = buf | (1 << PICE);                           // Interrupt des PIV jetzt zulassen.
-     io_out16(PICC, buf);
-
-     while(1)
-     {
-
-     }
-
-}
-#endif
