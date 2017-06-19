@@ -202,8 +202,9 @@ void emain(void* arg) {
 #define COM_SIGNAl_PIN				0		// Pin ueber den der Interrupts ausgeloest wird
 #define COM_DATA_IN_REGISTER		IN0		// Register ueber den das Byte eingelesen wird
 #define MAX_MESSAGE_SIZE			100		// Maximale Laenge einer Nachricht
-#define STARTBYTE					0x23	// Wert des Start-Bytes
-#define ENDBYTE						0    	// Wert des Ende-Bytes
+#define STARTBYTE					0x23	// Wert des Start-Bytes #
+#define ENDBYTE						0    	// Wert des Ende-Bytes /0
+#define READ                        0x00FF
 
 
 typedef struct {UCHAR hh, mm, ss;} uhrzeit;
@@ -216,21 +217,85 @@ STATE_N		comstate=warte_auf_start_byte;
 ULONG       byte_counter;
 
 
-void ISR_EXT_INT0(){
+uhrzeit     akt_zeit, hoch_zeit, runter_zeit;
+
+void do_param(UCHAR* auszuwertende_nachricht, uhrzeit* akt, uhrzeit* hoch, uhrzeit* runter){
+
+
+UCHAR i;
+unsigned short stunde = 0;
+unsigned short minute = 0;
+unsigned short sekunde = 0;
+
+
+    switch (auszuwertende_nachricht[1]){
+
+    case 'A':
+            i = 0;
+            stunde = 10*(auszuwertende_nachricht[i+2]-0x30);
+            stunde = stunde + (auszuwertende_nachricht[i+3]-0x30);
+
+            minute = 10* (auszuwertende_nachricht[i+4]-0x30);
+            minute = minute + (auszuwertende_nachricht[i+5]-0x30);
+
+            sekunde = 10*(auszuwertende_nachricht[i+6]-0x30);
+            sekunde  = sekunde + (auszuwertende_nachricht[i+7]-0x30);
+
+            akt->hh = stunde;
+            akt->mm = minute;
+            akt->ss = sekunde;
+
+         break;
+
+    case 'B':
+            i = 0;
+            stunde = 10*(auszuwertende_nachricht[i+2]-0x30);
+            stunde = stunde + (auszuwertende_nachricht[i+3]-0x30);
+
+            minute = 10* (auszuwertende_nachricht[i+4]-0x30);
+            minute = minute + (auszuwertende_nachricht[i+5]-0x30);
+
+            sekunde = 10*(auszuwertende_nachricht[i+6]-0x30);
+            sekunde  = sekunde + (auszuwertende_nachricht[i+7]-0x30);
+
+            hoch->hh = stunde;
+            hoch->mm = minute;
+            hoch->ss = sekunde;
+        break;
+
+    case 'C':
+            i = 0;
+            stunde = 10*(auszuwertende_nachricht[i+2]-0x30);
+            stunde = stunde + (auszuwertende_nachricht[i+3]-0x30);
+
+            minute = 10* (auszuwertende_nachricht[i+4]-0x30);
+            minute = minute + (auszuwertende_nachricht[i+5]-0x30);
+
+            sekunde = 10*(auszuwertende_nachricht[i+6]-0x30);
+            sekunde  = sekunde + (auszuwertende_nachricht[i+7]-0x30);
+
+            runter->hh = stunde;
+            runter->mm = minute;
+            runter->ss = sekunde;
+        break;
+
+    }
+}
+
+void ISR(){
     USHORT hilfe = 0;
     UCHAR buf;
-
-    buf=(UCHAR) (io_in8(SPDR2) & 0x00FF);                                               // Einlesen des Datenbytes in Slave
-
-
+    buf=(UCHAR) (io_in8(SPDR2) & READ);                                                 // Einlesen des Datenbytes in Slave
     steuerungsfunktion(buf, &byte_counter, &(nachricht[0]), &flag_ready, &comstate);    // Aufruf der Steuerungsfunktion
 
     hilfe = io_in8(SPSR2) & (~(1<<SPIF2));                                              // Zureucksetzen des Interrupt-Flags
 
     io_out8(SPSR2, hilfe);
+    if(flag_ready == 1){
+        do_param(nachricht, &akt_zeit, &hoch_zeit, &runter_zeit);
+    }
     return;
 }
-
 
 
 
@@ -241,7 +306,7 @@ void steuerungsfunktion(UCHAR byte_received, ULONG* byte_zaehler, UCHAR* empfang
         case warte_auf_start_byte:
 
             if ( byte_received == STARTBYTE) {                      // Uebergang nach warte_auf_end_byte
-                *byte_zaehler=0;                                    // Etwas tun am Uebergang.
+                *byte_zaehler = 0;                                    // Etwas tun am Uebergang.
                 empfangene_nachricht[*byte_zaehler]=byte_received;
                 *byte_zaehler=*byte_zaehler+1;
                 *state = warte_auf_end_byte;                        // Zustandswechsel
@@ -284,18 +349,13 @@ void steuerungsfunktion(UCHAR byte_received, ULONG* byte_zaehler, UCHAR* empfang
     }
 }
 
-void do_param(UCHAR* auszuwertende_nachricht, uhrzeit* akt, uhrzeit* hoch, uhrzeit* runter){
-
-}
 
 
-UCHAR		byte_received, nachricht[MAX_MESSAGE_SIZE], flag_ready;
-uhrzeit     akt_zeit, hoch_zeit, runter_zeit;
+
 
 
 
 void init_spi1(){                                                                   // emain-sender Sender SPI-Master
-
     io_out8(SPCR1, 0);                                                              // SPI ist Master, clock rate = 1/4,
     io_out8(SPCR1, ((1<<SPE1) | (1<<MSTR1)));
 }
@@ -314,7 +374,7 @@ void emain(void* arg){
         io_out16(PICC, buf);
 
         // Registrieren der ISRs in der Interupt-Vektor-Tabelle
-        setInterruptHandler(IVN_SPI2, ISR_EXT_INT0);
+        setInterruptHandler(IVN_SPI2, ISR);
 
         // Interrupt des PIV jetzt zulassen.
         buf = buf | (1 << PICE);
@@ -337,9 +397,7 @@ void emain(void* arg){
 }
 
 
-
 //################AB HIER STEHT ALLES FUER DAS SENDER-PROGRAMM #################################################
-
 
 void init_spi2(){ //emain Empfänger SPI-Slave
 
@@ -364,14 +422,23 @@ void emain_sender(void* arg){
 
             for(; i<=8; i++){ // Ein ASCII-Zeichen versenden
                 io_out8(SPDR1, parametriere_akt_zeit[i]);
+
             }
-            for(; i<=8; i++){ // Ein ASCII-Zeichen versenden
-                io_out8(SPDR1, parametriere_hoch_zeit[i]);
-            }
-            for(; i<=8; i++){ // Ein ASCII-Zeichen versenden
-                io_out8(SPDR1, parametriere_runter_zeit[i]);
+            if(i == 10){
+                for(i=0; i<=8; i++){ // Ein ASCII-Zeichen versenden
+                    io_out8(SPDR1, parametriere_hoch_zeit[i]);
+
+                  }
+                i++;
             }
 
+            if(i == 11){
+                for(i=0; i<=8; i++){ // Ein ASCII-Zeichen versenden
+                    io_out8(SPDR1, parametriere_runter_zeit[i]);
+                }
+
+                i+=2;
+             }
              ms_wait(100);
 
              io_out8(SPCR1,(io_in8(SPCR1) | (1<<notSS1)));
@@ -382,8 +449,7 @@ void emain_sender(void* arg){
 
       }
 
- }
 
-
+}
 #endif //V3_Aufgabe_2_und_3
 
