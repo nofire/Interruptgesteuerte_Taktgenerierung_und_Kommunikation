@@ -1,0 +1,2064 @@
+#include "simuc.h"
+
+///////////////////////////////////////////////////////////////////////////////////////
+//
+//#define V3_Aufgabe_1a
+//#define V3_Aufgabe_1b
+//#define V3_Aufgabe_1c
+//#define V3_Aufgabe_2
+#define V3_Aufgabe_3b
+///////////////////////////////////////////////////////////////////////////////////////
+
+ #ifdef V3_Aufgabe_1a
+
+#define ZT_MAXW	2   //3	//20
+#define SS_MAXW	60  //3	//60
+#define MM_MAXW	2   //3	//60
+#define HH_MAXW	1   //3	//24
+#define LENGTH 100
+#define BIT_POS_IST_OBEN            0
+#define BIT_POS_IST_UNTEN           1
+#define BIT_POS_NACH_OBEN           4
+#define BIT_POS_NACH_UNTEN          5
+#define BIT_POS_FAHRE_NACH_OBEN     9
+#define BIT_POS_MOTOR_AN            8
+#define BIT_POS_FAHRE_NACH_UNTEN	10
+
+typedef unsigned short int USHORT;
+typedef unsigned long int ULON;
+typedef unsigned short USHT;
+typedef unsigned char UCHAR;
+
+typedef struct {UCHAR hh; UCHAR mm; UCHAR ss;} uhrzeit;
+typedef enum {hoch, runter, steht} STATE;
+
+uhrzeit akt_zeit;
+uhrzeit hoch_zeit;
+uhrzeit runter_zeit;
+
+ULON zt=0;                                                                      // Globale Variablen zur Kommunikation mit der ISR
+ULON hh=0;
+ULON mm=0;
+ULON ss=0;
+
+void timer1_init(){
+
+    USHT buf = 0;
+
+    buf = (1<<PS11) | (1<<TM10);                                                // TCRA1 -> Timer Control Register A // Clock Source auf intern/8 Prescaler // Timer Modus Clear-Time-On-Compare-Match
+    io_out16(TCRA1,buf);
+
+    buf = (1<<CE1);                                                             // TCRB1 -> Timer Control Register B // Counter Enable
+    io_out16(TCRB1,buf);
+
+    buf = (1<<OCIE1);                                                           // TIMR1 // Compare Match Interrupt enable
+    io_out16(TIMR1,buf);
+
+    buf = 5000;                                                                  // CMPA1 //Compare Match Register auf 5000 einstellen
+    io_out16(CMPA1,buf);
+
+
+}
+
+
+void timer1_oco1_isr(){                                                         //	Interrupt Service Routine
+
+      UCHAR stringbuf[LENGTH], generierte_Uhrzeit[LENGTH];
+      USHORT buf;
+      zt++;
+      if(zt==ZT_MAXW){zt=0; ss++;}
+      if(ss==SS_MAXW){ss=0; mm++;}
+      if(mm==MM_MAXW){mm=0; hh++;}
+      if(hh==HH_MAXW){hh=0;}
+
+      sprintf(stringbuf,"zt=%d Uhrzeit: %d:%d:%d\n",zt,hh,mm,ss);
+      putstring(stringbuf);                                                       // Bei der Simulation des SimuC fuehrt der Aufruf von putstring() innerhalb einer ISR // ggf. zu einem Dead-Lock . Dies liegt aber nur am Simulator.
+
+      buf = io_in16(TIFR1);                                                       // Zuruecksetzen des Interrupt-Flags
+      buf = buf & ~(1 << OCIF1);
+      io_out16(TIFR1, buf);
+
+      akt_zeit.hh = hh; akt_zeit.mm = mm; akt_zeit.ss = ss;                       // Generierte Uhrzeit in akt_zeit speichern
+
+      sprintf(generierte_Uhrzeit,"Generierte Uhrzeit: %d:%d:%d\n", akt_zeit.hh,akt_zeit.mm,akt_zeit.ss);
+      putstring(generierte_Uhrzeit);
+
+}
+
+
+void steuerungsfunktion (	USHORT ist_oben, USHORT ist_unten,USHORT nach_oben, USHORT nach_unten,
+                            USHORT* p_fahre_nach_oben, USHORT* p_fahre_nach_unten, STATE* p_state, USHORT nach_oben_wegen_zeit,
+                            USHORT nach_unten_wegen_zeit){
+
+             if (nach_oben_wegen_zeit  != 0)  {*p_state = hoch;}
+        else if (nach_unten_wegen_zeit != 0)  {*p_state = runter;}
+        else{
+            switch (*p_state) {
+                case steht:     *p_fahre_nach_unten= 0; *p_fahre_nach_oben = 0;
+                                if    ((ist_unten == 0) && (nach_unten == 1) && (nach_oben == 0))      {*p_state = runter;}
+                                if    ((ist_oben == 0) && (nach_oben == 1))                            {*p_state = hoch;}
+                                if (!((ist_unten == 0) && (nach_unten == 1)  && (nach_oben == 0)) ||
+                                      ((ist_oben == 0) && (nach_oben == 1)))                           {*p_state = steht;}
+                                break;
+
+                case runter:    *p_fahre_nach_unten = 1; *p_fahre_nach_oben = 0;
+                                if (ist_unten == 1) {*p_state = steht;}
+                                if (ist_unten == 0){*p_state = runter;}
+                break;
+
+                case hoch:      *p_fahre_nach_unten = 0; *p_fahre_nach_oben = 1;
+                                if (ist_oben == 1) {*p_state = steht;}
+                                if (ist_oben == 0){*p_state = hoch;}
+
+                                break;
+                default:        *p_state = runter;
+           }
+        }
+    }
+
+
+void emain(void* arg){
+    STATE cstate;
+
+    USHORT         nach_oben, nach_unten, ist_oben, ist_unten,
+                   fahre_nach_oben, fahre_nach_unten,
+                   input, output, last_output,
+                   nach_oben_wegen_zeit, nach_unten_wegen_zeit;
+
+    INIT_BM_WITH_REGISTER_UI;
+
+    UCHAR stringbuf[LENGTH];
+
+    // Uhrzeiterfragen ohne weitere Ueberpruefung
+    /*putstring("Bitte die aktuelle Uhrzeit im Format hh:mm:ss eingeben\n");
+    getstring(stringbuf);
+    */sscanf(stringbuf,"%d:%d:%d",&hh, &mm, &ss);
+
+
+    io_out16(DIR1, 0xFF00);         // 1.)	Hardware konfigurieren // Ausgang: Bits 15 bis 8   Eingang: Bits 7 bis 0
+
+    cstate = runter;                // 2.)	 Definition des Startzustandes. Entspricht dem asynchronen Reset in VHDL.
+
+      //cstate = steht;
+
+    //-----------Selbst eingefügt
+
+      UCHAR buf = 0;
+
+      // Zur Sicherheit vor Initialisierung den Interupt des PIC generell deaktivieren
+      buf = io_in16(PICC);
+      buf = buf &  ~(1 << PICE);
+      io_out16(PICC, buf);
+
+      // Timer 1 initialisieren
+   /*   timer1_init();
+
+      // ISR registrieren
+      setInterruptHandler(IVN_OC1, timer1_oco1_isr);
+*/ //auskommentieren für 1a
+
+
+      buf = buf | (1 << PICE);      // Interrupt des PIC jetzt zulassen
+      io_out16(PICC, buf);
+
+//----------------------------------------
+       /*  akt_zeit.hh = 0;
+         akt_zeit.mm = 0;
+         akt_zeit.ss = 0;
+
+         hoch_zeit.hh = 0;
+         hoch_zeit.mm = 1;
+         hoch_zeit.ss = 0;
+
+         runter_zeit.hh = 0;
+         runter_zeit.mm = 1;
+         runter_zeit.ss = 55;
+        */ //Auskommentiert für 1a
+
+    while (1) {                                                 // 3.) Unendliche Schleife. Ein Schleifendurchlauf entspricht einem Zyklus des Automaten
+
+        SYNC_SIM;
+
+        /*Aufgabe 1a: Ermittlung der Eingangsgrößen*/
+
+           if((akt_zeit.hh == hoch_zeit.hh) &&
+              (akt_zeit.mm == hoch_zeit.mm) &&
+              (akt_zeit.ss == hoch_zeit.ss)){
+                 nach_oben_wegen_zeit = 1;
+           }else nach_oben_wegen_zeit = 0;
+
+           if((akt_zeit.hh == runter_zeit.hh) &&
+              (akt_zeit.mm == runter_zeit.mm) &&
+              (akt_zeit.ss == runter_zeit.ss)){
+                 nach_unten_wegen_zeit = 1;
+           }else nach_unten_wegen_zeit = 0;
+
+
+        input = io_in16(IN1);                                     // 4.)	Einlesen der Eingabesignale einmal je Zyklus
+
+        ist_oben = (input >> BIT_POS_IST_OBEN)     & 0x01;        // extrahieren von "ist_oben" (BIT_POS_IST_OBEN)
+        ist_unten = (input >> BIT_POS_IST_UNTEN)   & 0x01;        // extrahieren von "ist_unten" (BIT_POS_IST_UNTEN)
+        nach_oben = (input >> BIT_POS_NACH_OBEN)   & 0x01;        // extrahieren von "nach_oben" (BIT_POS_NACH_OBEN)
+        nach_unten = (input >> BIT_POS_NACH_UNTEN) & 0x01;        // extrahieren von "nach_unten" (BIT_POS_NACH_UNTEN)
+
+
+        steuerungsfunktion    (	ist_oben, ist_unten, nach_oben, nach_unten,
+                                &fahre_nach_oben, &fahre_nach_unten, &cstate,
+                                nach_oben_wegen_zeit, nach_unten_wegen_zeit);
+
+        //------------------------------
+
+        output=fahre_nach_unten<<BIT_POS_FAHRE_NACH_UNTEN;        // 7b.) Ausgabesignale ausgeben
+        output=output | (fahre_nach_oben<< BIT_POS_FAHRE_NACH_OBEN);
+
+
+        if (last_output != output) {                             // Nur wirklich ausgeben wenn notwendig // Optimierung mittels bedigter Portausgabe
+            output=output | (1<< BIT_POS_MOTOR_AN);              // Nur fuer Bandmodell
+            io_out16(OUT1, io_in16(OUT1) & 0x00FF);
+            io_out16(OUT1, io_in16(OUT1) |  output);
+            last_output = output;
+        }
+    }
+}
+#endif // V3_Aufgabe_1a
+
+#ifdef V3_Aufgabe_1b
+
+typedef struct {
+   unsigned char hh;
+   unsigned char mm;
+   unsigned char ss;
+} uhrzeit;
+
+uhrzeit akt_zeit;
+uhrzeit hoch_zeit;
+uhrzeit runter_zeit;
+
+
+
+
+
+//------------------------------
+
+// Globale Variablen zur Kommunikation mit der ISR
+unsigned long int zt=0, hh=0, mm=0, ss=0;
+
+void timer1_init()
+{
+   /*	Zur Berechnung der Werte fuer den Prescaler und den Compare-Match:
+       Bei einer Frequenz von 4 Mhz zaehlt der Timer mit einem Takt von 0,25us.
+       Er kann mit seinen 65536 moeglichen Zaehlstaenden eine maximale Interrupt-Periode von 65536 * 0,25us = 16384us realisieren.
+       Dies ist zu schnell. => Der Zaheler muss mittels des Prescalers langsamer eingestellt werden.
+       Die ideale Untersetzung waere  50000us / 16384us = 3,0517.
+       Da es diese Unterssetzung (Prescaler-Wert) nicht gibt waehlen wir den naechst groesseren Wert also 8.
+       Der Zaehler zaehlt jetzt mit einem Takt vom 2us. => Die Interrupts haben bei einem Compare-Match-Wert von 65535
+       eine Periode von 131072 us.Der Compare-Match-Wert muss auf 50000us/131072us*65536us = 25000 eingestellt werden.
+   */
+
+   unsigned short buf = 0;
+
+   // TCRA1
+   // Clock Source auf intern/8 Prescaler
+   // Timer Modus Clear-Timer-On-Compare-Match
+   buf = (1 << PS11) | (1 << TM10);
+   io_out16(TCRA1, buf);
+
+   // TCRB1
+   // Counter Enable
+   buf = (1 <<CE1);
+   io_out16(TCRB1, buf);
+
+   // TIMR1
+   // Compare Match Interrupt enable
+   buf = (1 << OCIE1);
+   io_out16(TIMR1, buf);
+
+   // CMPA1
+   // Compare Match Register auf ...
+   buf = 5000; //25000;
+   io_out16(CMPA1, buf);
+
+}
+
+// Makros damit man beim Testen nicht so lange warten muss
+// Die korrekten Werte stehen als Kommentare jeweils dahinter
+#define ZT_MAXW	3	//20
+#define SS_MAXW	3	//60
+#define MM_MAXW	3	//60
+#define HH_MAXW	3	//24
+
+//	Interrupt Service Routine
+void timer1_oco1_isr()
+{
+   unsigned char stringbuf[100];
+   unsigned short int buf;
+
+   zt++;
+
+   if(zt==ZT_MAXW){
+       zt=0;
+       ss++;
+   }
+
+   if(ss==SS_MAXW){
+       ss=0;
+       mm++;
+   }
+
+   if(mm==MM_MAXW){
+       mm=0;
+       hh++;
+   }
+   if(hh==HH_MAXW){
+       hh=0;
+   }
+   akt_zeit.hh = hh;  //akt_zeit zu gewiesen
+   akt_zeit.mm = mm;
+   akt_zeit.ss = ss;
+
+   sprintf(stringbuf,"zt=%d  Uhrzeit: %d:%d:%d\n",zt,hh,mm,ss);
+   // Achtung die Verwendung von putstring() kann in der Simulationsumgebung
+   // zu einem Deadlock fuehren, d.h. alles bleibt einfach stehen.
+   // Dahr ist dies hier (zur Sicherheit) auskommentiert.
+   // putstring(stringbuf);
+
+   // Zuruecksetzen des Interrupt-Flags
+   buf = io_in16(TIFR1);
+   buf = buf & ~(1 << OCIF1);
+   io_out16(TIFR1, buf);
+
+}
+
+
+
+
+
+//--------------------------------
+
+
+/*
+   ES GELTEN DIE BEI "rollosteuerung_moore" AN GLEICHER STELLE VORANGESTELLTEN KOMMENTARE
+*/
+
+// Einige Defines zum leichteren Wiederfinden
+#define BIT_POS_IST_OBEN	0
+#define BIT_POS_IST_UNTEN	1
+#define BIT_POS_NACH_OBEN	4
+#define BIT_POS_NACH_UNTEN	5
+#define BIT_POS_FAHRE_NACH_OBEN	9
+#define BIT_POS_MOTOR_AN	8
+#define BIT_POS_FAHRE_NACH_UNTEN	10
+
+typedef enum {hoch, runter, steht} STATE;	// Datentyp für den Zustand das Automaten.
+                                           // Vergleichbar mit "TYPE .... IS" in VHDL.
+typedef unsigned short int USHORT;			// Eigener Datentyp zur Abkuerzung
+
+
+void steuerungsfunktion    (	USHORT ist_oben, USHORT ist_unten,
+                       USHORT nach_oben, USHORT nach_unten,
+                       USHORT* p_fahre_nach_oben,
+                       USHORT* p_fahre_nach_unten,
+                       STATE* p_state, USHORT nach_oben_wegen_zeit,
+                               USHORT nach_unten_wegen_zeit)
+{
+
+   // 5.)	switch-case-Konstrukt zur "Verwaltung" der Zustaende
+   switch (*p_state) {
+
+       // 6.)	Ein CASE je Zustand
+       case steht:
+
+           // 7a.)  .... Ausgabesignale bestimmen
+           *p_fahre_nach_unten=0; *p_fahre_nach_oben=0;
+
+
+
+
+
+           // 8.)    Eingabesignale auswerten und Zustandswechsel herbei fuehren
+           //         Ein IF je Pfeil
+           if (  (ist_unten == 0) && (nach_unten == 1) && (nach_oben == 0)) {
+               *p_state = runter; // Wechsel in den Zustand "runter"
+           }
+           if (  (ist_oben == 0) && (nach_oben == 1) ){
+               *p_state = hoch;  // Wechsel in den Zustand "hoch"
+           }
+
+           // Diese if-Anweisung kann entfallen, da sie cstate nicht veraendert.
+           if ( !(    ((ist_unten == 0) && (nach_unten == 1) && (nach_oben == 0))
+                   || ((ist_oben == 0) && (nach_oben == 1)) )      ) {
+               *p_state = steht; // Bleibe im Zustand "steht"
+           }
+
+
+           if(nach_oben_wegen_zeit != 0)  //nach_oben oder unten
+           {
+               *p_state = hoch;
+           }
+
+           if(nach_unten_wegen_zeit != 0)
+           {
+               *p_state = runter;
+           }
+
+
+           break;
+
+       case runter:
+
+           // 7a.)  Ausgabesignale bestimmen
+           *p_fahre_nach_unten=1; *p_fahre_nach_oben=0;
+
+
+           // 8.)    Eingabesignale auswerten und Zustandswechsel herbei fuehren
+           if (ist_unten == 1) {
+               *p_state = steht; // Wechsel in den Zustand "steht"
+           }
+
+           // Diese if-Anweisung kann entfallen, da sie cstate nicht veraendert.
+           if (ist_unten == 0) {
+               *p_state = runter; // Bleibe im Zustand "runter"
+           }
+
+
+           if(nach_oben_wegen_zeit != 0)
+           {
+               *p_state = hoch;
+           }
+
+           if(nach_unten_wegen_zeit != 0)
+           {
+               *p_state = runter;
+           }
+
+           break;
+
+       case hoch:
+
+           // 7a.)  Ausgabesignale bestimmen
+           *p_fahre_nach_unten=0; *p_fahre_nach_oben=1;
+
+           // 8.)    Eingabesignale auswerten und Zustandswechsel herbei fuehren
+           if (ist_oben == 1){
+               *p_state = steht; // Wechsel in den Zustand "steht"
+           }
+
+           // Diese if-Anweisung kann entfallen, da sie cstate nicht veraendert.
+           if (ist_oben == 0){
+               *p_state = hoch; // Bleibe im Zustand "hoch"
+           }
+
+
+           if(nach_oben_wegen_zeit != 0)
+           {
+               *p_state = hoch;
+           }
+
+           if(nach_unten_wegen_zeit != 0)
+           {
+               *p_state = runter;
+           }
+
+           break;
+
+       // 9.) nicht erlaubte Zustaende "abfangen"
+       default:
+           *p_state = runter;
+
+   } // end switch
+} // end steuerungsfunktion()
+
+
+
+
+void emain(void* arg)
+{
+
+
+
+   USHORT nach_oben_wegen_zeit = 0;  // USHORT variablen
+   USHORT nach_unten_wegen_zeit = 0;
+
+
+
+   STATE cstate;		// Variable für den Zustand das Automaten.
+
+   // Variablen für die Eingabesignale. Eine Variable fuer jedes Signal.
+   USHORT		nach_oben;
+   USHORT		nach_unten;
+   USHORT		ist_oben;
+   USHORT		ist_unten;
+
+   // Variablen für die Ausgabesignale. Eine Variable fuer jedes Signal.
+   USHORT		fahre_nach_oben;
+   USHORT		fahre_nach_unten;
+
+   USHORT		input, output, last_output;
+
+
+   INIT_BM_WITH_REGISTER_UI;	// Nur fuer Simulation
+
+   unsigned char stringbuf[100];
+   // Uhrzeiterfragen ohne weitere Ueberpruefung
+   /*putstring("Bitte die aktuelle Uhrzeit im Format hh:mm:ss eingeben\n");
+   getstring(stringbuf);
+   */sscanf(stringbuf,"%d:%d:%d",&hh, &mm, &ss);
+
+
+   // 1.)	Hardware konfigurieren
+   io_out16(DIR1, 0xFF00); // Ausgang: Bits 15 bis 8   Eingang: Bits 7 bis 0
+
+   // 2.)	 Definition des Startzustandes. Entspricht dem asynchronen Reset in VHDL.
+   cstate = runter;
+     //cstate = steht;
+
+
+
+
+     //-----------Selbst eingefügt
+
+     unsigned short buf = 0;
+
+     // Zur Sicherheit vor Initialisierung den Interupt des PIC generell deaktivieren
+     buf = io_in16(PICC);
+     buf = buf &  ~(1 << PICE);
+     io_out16(PICC, buf);
+
+     // Timer 1 initialisieren
+     timer1_init();
+
+     // ISR registrieren
+     setInterruptHandler(IVN_OC1, timer1_oco1_isr);
+//auskommentieren für 1a
+
+
+     // Interrupt des PIC jetzt zulassen
+     buf = buf | (1 << PICE);
+     io_out16(PICC, buf);
+
+//----------------------------------------
+        akt_zeit.hh = 0;
+        akt_zeit.mm = 0;
+        akt_zeit.ss = 0;
+
+        hoch_zeit.hh = 0;
+        hoch_zeit.mm = 1;
+        hoch_zeit.ss = 0;
+
+        runter_zeit.hh = 0;
+        runter_zeit.mm = 1;
+        runter_zeit.ss = 55;
+        //Auskommentiert für 1a
+
+   // 3.) Unendliche Schleife. Ein Schleifendurchlauf entspricht einem Zyklus des Automaten
+   while (1) {
+
+       SYNC_SIM; // Nur fuer Simulation
+
+
+
+       //--------------------------
+
+
+
+
+
+
+
+       if(akt_zeit.hh == hoch_zeit.hh && akt_zeit.mm == hoch_zeit.mm && akt_zeit.ss == hoch_zeit.ss)
+       {
+           nach_oben_wegen_zeit =1;
+       }
+       else
+       {
+           nach_oben_wegen_zeit = 0;
+       }
+
+       if(akt_zeit.hh == runter_zeit.hh && akt_zeit.mm == runter_zeit.mm && akt_zeit.ss == runter_zeit.ss)
+       {
+           nach_unten_wegen_zeit = 1;
+
+
+
+       }
+       else
+       {
+           nach_unten_wegen_zeit = 0;
+       }
+
+       //-------------------------------
+
+
+
+       // 4.)	Einlesen der Eingabesignale einmal je Zyklus
+       input = io_in16(IN1);
+
+       // extrahieren von "ist_oben" (BIT_POS_IST_OBEN)
+       ist_oben = (input >> BIT_POS_IST_OBEN) & 0x01;
+
+       // extrahieren von "ist_unten" (BIT_POS_IST_UNTEN)
+       ist_unten = (input >> BIT_POS_IST_UNTEN) & 0x01;
+
+       // extrahieren von "nach_oben" (BIT_POS_NACH_OBEN)
+       nach_oben = (input >> BIT_POS_NACH_OBEN) & 0x01;
+
+       // extrahieren von "nach_unten" (BIT_POS_NACH_UNTEN)
+       nach_unten = (input >> BIT_POS_NACH_UNTEN) & 0x01;
+
+       // Aufruf der Steuerungsfunktion
+       steuerungsfunktion    (	ist_oben, ist_unten, nach_oben, nach_unten,
+                           &fahre_nach_oben, &fahre_nach_unten, &cstate,
+                               nach_oben_wegen_zeit, nach_unten_wegen_zeit);
+
+
+
+       //------------------------------
+
+
+
+
+       //-------------------------
+
+       // 7b.) Ausgabesignale ausgeben
+       output=fahre_nach_unten<<BIT_POS_FAHRE_NACH_UNTEN;
+       output=output | (fahre_nach_oben<< BIT_POS_FAHRE_NACH_OBEN);
+
+
+       // Nur wirklich ausgeben wenn notwendig
+       // Optimierung mittels bedigter Portausgabe
+       if (last_output != output) {
+           output=output | (1<< BIT_POS_MOTOR_AN);   // Nur fuer Bandmodell
+           io_out16(OUT1, io_in16(OUT1) & 0x00FF);
+           io_out16(OUT1, io_in16(OUT1) |  output);
+           last_output = output;
+       }
+   } // end while
+} // end main
+#endif // V3_Aufgabe_1b
+
+
+#ifdef V3_Aufgabe_1c
+
+typedef struct {
+    unsigned char hh;
+    unsigned char mm;
+    unsigned char ss;
+} uhrzeit;
+
+uhrzeit akt_zeit;
+uhrzeit hoch_zeit;
+uhrzeit runter_zeit;
+
+
+
+
+
+//------------------------------
+
+// Globale Variablen zur Kommunikation mit der ISR
+unsigned long int zt=0, hh=0, mm=0, ss=0;
+
+void timer1_init()
+{
+    /*	Zur Berechnung der Werte fuer den Prescaler und den Compare-Match:
+        Bei einer Frequenz von 4 Mhz zaehlt der Timer mit einem Takt von 0,25us.
+        Er kann mit seinen 65536 moeglichen Zaehlstaenden eine maximale Interrupt-Periode von 65536 * 0,25us = 16384us realisieren.
+        Dies ist zu schnell. => Der Zaheler muss mittels des Prescalers langsamer eingestellt werden.
+        Die ideale Untersetzung waere  50000us / 16384us = 3,0517.
+        Da es diese Unterssetzung (Prescaler-Wert) nicht gibt waehlen wir den naechst groesseren Wert also 8.
+        Der Zaehler zaehlt jetzt mit einem Takt vom 2us. => Die Interrupts haben bei einem Compare-Match-Wert von 65535
+        eine Periode von 131072 us.Der Compare-Match-Wert muss auf 50000us/131072us*65536us = 25000 eingestellt werden.
+    */
+
+    unsigned short buf = 0;
+
+    // TCRA1
+    // Clock Source auf intern/8 Prescaler
+    // Timer Modus Clear-Timer-On-Compare-Match
+    buf = (1 << PS11) | (1 << TM10);
+    io_out16(TCRA1, buf);
+
+    // TCRB1
+    // Counter Enable
+    buf = (1 <<CE1);
+    io_out16(TCRB1, buf);
+
+    // TIMR1
+    // Compare Match Interrupt enable
+    buf = (1 << OCIE1);
+    io_out16(TIMR1, buf);
+
+    // CMPA1
+    // Compare Match Register auf ...
+    buf = 5000; //25000;
+    io_out16(CMPA1, buf);
+
+}
+
+// Makros damit man beim Testen nicht so lange warten muss
+// Die korrekten Werte stehen als Kommentare jeweils dahinter
+#define ZT_MAXW	2   //3	//20
+#define SS_MAXW	60 //3	//60
+#define MM_MAXW	2  //3	//60
+#define HH_MAXW	1   //3	//24
+
+//	Interrupt Service Routine
+void timer1_oco1_isr()
+{
+    unsigned char stringbuf[100];
+    unsigned short int buf;
+
+    zt++;
+
+    if(zt==ZT_MAXW){
+        zt=0;
+        ss++;
+    }
+
+    if(ss==SS_MAXW){
+        ss=0;
+        mm++;
+    }
+
+    if(mm==MM_MAXW){
+        mm=0;
+        hh++;
+    }
+    if(hh==HH_MAXW){
+        hh=0;
+    }
+    akt_zeit.hh = hh;  //akt_zeit zu gewiesen
+    akt_zeit.mm = mm;
+    akt_zeit.ss = ss;
+
+    sprintf(stringbuf,"zt=%d  Uhrzeit: %d:%d:%d\n",zt,hh,mm,ss);
+    // Achtung die Verwendung von putstring() kann in der Simulationsumgebung
+    // zu einem Deadlock fuehren, d.h. alles bleibt einfach stehen.
+    // Dahr ist dies hier (zur Sicherheit) auskommentiert.
+    // putstring(stringbuf);
+
+    // Zuruecksetzen des Interrupt-Flags
+    buf = io_in16(TIFR1);
+    buf = buf & ~(1 << OCIF1);
+    io_out16(TIFR1, buf);
+
+}
+
+
+
+
+
+//--------------------------------
+
+
+/*
+    ES GELTEN DIE BEI "rollosteuerung_moore" AN GLEICHER STELLE VORANGESTELLTEN KOMMENTARE
+*/
+
+// Einige Defines zum leichteren Wiederfinden
+#define BIT_POS_IST_OBEN	0
+#define BIT_POS_IST_UNTEN	1
+#define BIT_POS_NACH_OBEN	4
+#define BIT_POS_NACH_UNTEN	5
+#define BIT_POS_FAHRE_NACH_OBEN	9
+#define BIT_POS_MOTOR_AN	8
+#define BIT_POS_FAHRE_NACH_UNTEN	10
+
+typedef enum {hoch, runter, steht} STATE;	// Datentyp für den Zustand das Automaten.
+                                            // Vergleichbar mit "TYPE .... IS" in VHDL.
+typedef unsigned short int USHORT;			// Eigener Datentyp zur Abkuerzung
+
+
+void steuerungsfunktion    (	USHORT ist_oben, USHORT ist_unten,
+                        USHORT nach_oben, USHORT nach_unten,
+                        USHORT* p_fahre_nach_oben,
+                        USHORT* p_fahre_nach_unten,
+                        STATE* p_state, USHORT nach_oben_wegen_zeit,
+                                USHORT nach_unten_wegen_zeit)
+{
+
+    // 5.)	switch-case-Konstrukt zur "Verwaltung" der Zustaende
+    switch (*p_state) {
+
+        // 6.)	Ein CASE je Zustand
+        case steht:
+
+            // 7a.)  .... Ausgabesignale bestimmen
+            *p_fahre_nach_unten=0; *p_fahre_nach_oben=0;
+
+
+
+
+
+            // 8.)    Eingabesignale auswerten und Zustandswechsel herbei fuehren
+            //         Ein IF je Pfeil
+            if (  (ist_unten == 0) && (nach_unten == 1) && (nach_oben == 0)) {
+                *p_state = runter; // Wechsel in den Zustand "runter"
+            }
+            if (  (ist_oben == 0) && (nach_oben == 1) ){
+                *p_state = hoch;  // Wechsel in den Zustand "hoch"
+            }
+
+            // Diese if-Anweisung kann entfallen, da sie cstate nicht veraendert.
+            if ( !(    ((ist_unten == 0) && (nach_unten == 1) && (nach_oben == 0))
+                    || ((ist_oben == 0) && (nach_oben == 1)) )      ) {
+                *p_state = steht; // Bleibe im Zustand "steht"
+            }
+
+
+            if(nach_oben_wegen_zeit != 0)  //nach_oben oder unten
+            {
+                *p_state = hoch;
+            }
+
+            if(nach_unten_wegen_zeit != 0)
+            {
+                *p_state = runter;
+            }
+
+
+            break;
+
+        case runter:
+
+            // 7a.)  Ausgabesignale bestimmen
+            *p_fahre_nach_unten=1; *p_fahre_nach_oben=0;
+
+
+            // 8.)    Eingabesignale auswerten und Zustandswechsel herbei fuehren
+            if (ist_unten == 1) {
+                *p_state = steht; // Wechsel in den Zustand "steht"
+            }
+
+            // Diese if-Anweisung kann entfallen, da sie cstate nicht veraendert.
+            if (ist_unten == 0) {
+                *p_state = runter; // Bleibe im Zustand "runter"
+            }
+
+
+            if(nach_oben_wegen_zeit != 0)
+            {
+                *p_state = hoch;
+            }
+
+            if(nach_unten_wegen_zeit != 0)
+            {
+                *p_state = runter;
+            }
+
+            break;
+
+        case hoch:
+
+            // 7a.)  Ausgabesignale bestimmen
+            *p_fahre_nach_unten=0; *p_fahre_nach_oben=1;
+
+            // 8.)    Eingabesignale auswerten und Zustandswechsel herbei fuehren
+            if (ist_oben == 1){
+                *p_state = steht; // Wechsel in den Zustand "steht"
+            }
+
+            // Diese if-Anweisung kann entfallen, da sie cstate nicht veraendert.
+            if (ist_oben == 0){
+                *p_state = hoch; // Bleibe im Zustand "hoch"
+            }
+
+
+            if(nach_oben_wegen_zeit != 0)
+            {
+                *p_state = hoch;
+            }
+
+            if(nach_unten_wegen_zeit != 0)
+            {
+                *p_state = runter;
+            }
+
+            break;
+
+        // 9.) nicht erlaubte Zustaende "abfangen"
+        default:
+            *p_state = runter;
+
+    } // end switch
+} // end steuerungsfunktion()
+
+
+
+
+void emain(void* arg)
+{
+
+
+
+    USHORT nach_oben_wegen_zeit = 0;  // USHORT variablen
+    USHORT nach_unten_wegen_zeit = 0;
+
+
+
+    STATE cstate;		// Variable für den Zustand das Automaten.
+
+    // Variablen für die Eingabesignale. Eine Variable fuer jedes Signal.
+    USHORT		nach_oben;
+    USHORT		nach_unten;
+    USHORT		ist_oben;
+    USHORT		ist_unten;
+
+    // Variablen für die Ausgabesignale. Eine Variable fuer jedes Signal.
+    USHORT		fahre_nach_oben;
+    USHORT		fahre_nach_unten;
+
+    USHORT		input, output, last_output;
+
+
+    INIT_BM_WITH_REGISTER_UI;	// Nur fuer Simulation
+
+    unsigned char stringbuf[100];
+    // Uhrzeiterfragen ohne weitere Ueberpruefung
+    /*putstring("Bitte die aktuelle Uhrzeit im Format hh:mm:ss eingeben\n");
+    getstring(stringbuf);
+    */sscanf(stringbuf,"%d:%d:%d",&hh, &mm, &ss);
+
+
+    // 1.)	Hardware konfigurieren
+    io_out16(DIR1, 0xFF00); // Ausgang: Bits 15 bis 8   Eingang: Bits 7 bis 0
+
+    // 2.)	 Definition des Startzustandes. Entspricht dem asynchronen Reset in VHDL.
+    cstate = runter;
+      //cstate = steht;
+
+
+
+
+      //-----------Selbst eingefügt
+
+      unsigned short buf = 0;
+
+      // Zur Sicherheit vor Initialisierung den Interupt des PIC generell deaktivieren
+      buf = io_in16(PICC);
+      buf = buf &  ~(1 << PICE);
+      io_out16(PICC, buf);
+
+      // Timer 1 initialisieren
+      timer1_init();
+
+      // ISR registrieren
+      setInterruptHandler(IVN_OC1, timer1_oco1_isr);
+//auskommentieren für 1a
+
+
+      // Interrupt des PIC jetzt zulassen
+      buf = buf | (1 << PICE);
+      io_out16(PICC, buf);
+
+//----------------------------------------
+         akt_zeit.hh = 0;
+         akt_zeit.mm = 0;
+         akt_zeit.ss = 0;
+
+         hoch_zeit.hh = 0;
+         hoch_zeit.mm = 1;
+         hoch_zeit.ss = 0;
+
+         runter_zeit.hh = 0;
+         runter_zeit.mm = 1;
+         runter_zeit.ss = 55;
+         //Auskommentiert für 1a
+
+    // 3.) Unendliche Schleife. Ein Schleifendurchlauf entspricht einem Zyklus des Automaten
+    while (1) {
+
+        SYNC_SIM; // Nur fuer Simulation
+
+
+
+        //--------------------------
+
+
+
+
+
+
+
+        if(akt_zeit.hh == hoch_zeit.hh && akt_zeit.mm == hoch_zeit.mm && akt_zeit.ss == hoch_zeit.ss)
+        {
+            nach_oben_wegen_zeit =1;
+        }
+        else
+        {
+            nach_oben_wegen_zeit = 0;
+        }
+
+        if(akt_zeit.hh == runter_zeit.hh && akt_zeit.mm == runter_zeit.mm && akt_zeit.ss == runter_zeit.ss)
+        {
+            nach_unten_wegen_zeit = 1;
+
+
+
+        }
+        else
+        {
+            nach_unten_wegen_zeit = 0;
+        }
+
+        //-------------------------------
+
+
+
+        // 4.)	Einlesen der Eingabesignale einmal je Zyklus
+        input = io_in16(IN1);
+
+        // extrahieren von "ist_oben" (BIT_POS_IST_OBEN)
+        ist_oben = (input >> BIT_POS_IST_OBEN) & 0x01;
+
+        // extrahieren von "ist_unten" (BIT_POS_IST_UNTEN)
+        ist_unten = (input >> BIT_POS_IST_UNTEN) & 0x01;
+
+        // extrahieren von "nach_oben" (BIT_POS_NACH_OBEN)
+        nach_oben = (input >> BIT_POS_NACH_OBEN) & 0x01;
+
+        // extrahieren von "nach_unten" (BIT_POS_NACH_UNTEN)
+        nach_unten = (input >> BIT_POS_NACH_UNTEN) & 0x01;
+
+        // Aufruf der Steuerungsfunktion
+        steuerungsfunktion    (	ist_oben, ist_unten, nach_oben, nach_unten,
+                            &fahre_nach_oben, &fahre_nach_unten, &cstate,
+                                nach_oben_wegen_zeit, nach_unten_wegen_zeit);
+
+
+
+        //------------------------------
+
+
+
+
+        //-------------------------
+
+        // 7b.) Ausgabesignale ausgeben
+        output=fahre_nach_unten<<BIT_POS_FAHRE_NACH_UNTEN;
+        output=output | (fahre_nach_oben<< BIT_POS_FAHRE_NACH_OBEN);
+
+
+        // Nur wirklich ausgeben wenn notwendig
+        // Optimierung mittels bedigter Portausgabe
+        if (last_output != output) {
+            output=output | (1<< BIT_POS_MOTOR_AN);   // Nur fuer Bandmodell
+            io_out16(OUT1, io_in16(OUT1) & 0x00FF);
+            io_out16(OUT1, io_in16(OUT1) |  output);
+            last_output = output;
+        }
+    } // end while
+} // end main
+#endif // V3_Aufgabe_1c
+
+#ifdef V3_Aufgabe_2
+#include "user_conf.h"
+#define LEN 300
+#define COM_SIGNAl_PIN				0		// Pin ueber den der Interrupts ausgeloest wird
+#define COM_DATA_IN_REGISTER		IN0		// Register ueber den das Byte eingelesen wird
+#define MAX_MESSAGE_SIZE			100		// Maximale Laenge einer Nachricht
+#define STARTBYTE					0x23	// Wert des Start-Bytes #
+#define ENDBYTE						0    	// Wert des Ende-Bytes /0
+#define READ                        0x00FF
+
+
+typedef struct {UCHAR hh, mm, ss;} uhrzeit;
+
+typedef enum {warte_auf_start_byte, warte_auf_end_byte} STATE_N;
+
+UCHAR		nachricht[MAX_MESSAGE_SIZE];
+UCHAR		flag_ready;
+STATE_N		comstate=warte_auf_start_byte;
+ULONG       byte_counter;
+
+UCHAR       byte_received;
+
+
+uhrzeit     akt_zeit, hoch_zeit, runter_zeit;
+
+/*void do_param(UCHAR* auszuwertende_nachricht, uhrzeit* akt, uhrzeit* hoch, uhrzeit* runter){
+
+
+UCHAR i;
+unsigned short stunde = 0;
+unsigned short minute = 0;
+unsigned short sekunde = 0;
+
+
+// Umwandeln von hex in dezimal
+
+
+    switch (auszuwertende_nachricht[1]){
+
+    case 'A':
+            i = 0;
+            stunde = 10*(auszuwertende_nachricht[i+2]-0x30);
+            stunde = stunde + (auszuwertende_nachricht[i+3]-0x30);
+
+            minute = 10* (auszuwertende_nachricht[i+4]-0x30);
+            minute = minute + (auszuwertende_nachricht[i+5]-0x30);
+
+            sekunde = 10*(auszuwertende_nachricht[i+6]-0x30);
+            sekunde  = sekunde + (auszuwertende_nachricht[i+7]-0x30);
+
+            akt->hh = stunde;
+            akt->mm = minute;
+            akt->ss = sekunde;
+
+         break;
+
+    case 'B':
+            i = 0;
+            stunde = 10*(auszuwertende_nachricht[i+2]-0x30);
+            stunde = stunde + (auszuwertende_nachricht[i+3]-0x30);
+
+            minute = 10* (auszuwertende_nachricht[i+4]-0x30);
+            minute = minute + (auszuwertende_nachricht[i+5]-0x30);
+
+            sekunde = 10*(auszuwertende_nachricht[i+6]-0x30);
+            sekunde  = sekunde + (auszuwertende_nachricht[i+7]-0x30);
+
+            hoch->hh = stunde;
+            hoch->mm = minute;
+            hoch->ss = sekunde;
+        break;
+
+    case 'C':
+            i = 0;
+            stunde = 10*(auszuwertende_nachricht[i+2]-0x30);
+            stunde = stunde + (auszuwertende_nachricht[i+3]-0x30);
+
+            minute = 10* (auszuwertende_nachricht[i+4]-0x30);
+            minute = minute + (auszuwertende_nachricht[i+5]-0x30);
+
+            sekunde = 10*(auszuwertende_nachricht[i+6]-0x30);
+            sekunde  = sekunde + (auszuwertende_nachricht[i+7]-0x30);
+
+            runter->hh = stunde;
+            runter->mm = minute;
+            runter->ss = sekunde;
+        break;
+
+    }
+}
+*/
+
+void ISR(){
+    USHORT hilfe = 0;
+    //UCHAR buf;
+    byte_received=(UCHAR) (io_in8(SPDR2) & 0x00FF);       //Byte_received                                          // Einlesen des Datenbytes in Slave
+    //steuerungsfunktion(buf, &byte_counter, &(nachricht[0]), &flag_ready, &comstate);    // Aufruf der Steuerungsfunktion
+
+    hilfe = io_in8(SPSR2) & (~(1<<SPIF2));                        // Zureucksetzen des Interrupt-Flags
+
+    io_out8(SPSR2, hilfe);
+    /*if(flag_ready == 1){
+        do_param(nachricht, &akt_zeit, &hoch_zeit, &runter_zeit);
+    }*/
+    return;
+}
+
+
+/*
+void steuerungsfunktion(UCHAR byte_received, ULONG* byte_zaehler, UCHAR* empfangene_nachricht, UCHAR* ready, STATE_N* state){
+
+    switch (*state) {
+
+        case warte_auf_start_byte:
+
+            if ( byte_received == STARTBYTE) {                      // Uebergang nach warte_auf_end_byte
+                *byte_zaehler = 0;                                    // Etwas tun am Uebergang.
+                empfangene_nachricht[*byte_zaehler]=byte_received;
+                *byte_zaehler=*byte_zaehler+1;
+                *state = warte_auf_end_byte;                        // Zustandswechsel
+
+            }
+            break;
+
+        case warte_auf_end_byte:
+            if (byte_received == ENDBYTE)  {                        // Uebergang nach warte_auf_start_byte
+
+                empfangene_nachricht[*byte_zaehler]=byte_received;
+                *byte_zaehler=*byte_zaehler+1;
+                *ready=1;
+                *state = warte_auf_start_byte;
+
+                do_param(nachricht, &akt_zeit, &hoch_zeit, &runter_zeit); //do_param aufrufen
+
+
+            }
+
+            if (*byte_zaehler == MAX_MESSAGE_SIZE-1) {
+                    *state = warte_auf_start_byte;                  // Die Nachricht ist zu lang und kann daher nicht gueltig sein!
+            }
+
+            if (byte_received == STARTBYTE) {                       // Uebergang auf sich selbst nur damit etwas getan wird.
+                *byte_zaehler=0;
+                empfangene_nachricht[*byte_zaehler]=byte_received;
+                *byte_zaehler=*byte_zaehler+1;
+                *state = warte_auf_end_byte;                        // Ist ueberfluessing dient aber hoffentlich
+                                                                    // dem Verstaendnis
+            }
+
+            if ((byte_received != STARTBYTE) && (byte_received != ENDBYTE)
+                && (*byte_zaehler < MAX_MESSAGE_SIZE-1)) {
+                empfangene_nachricht[*byte_zaehler]=byte_received;
+                *byte_zaehler=*byte_zaehler+1;
+                *state = warte_auf_end_byte;
+            }
+
+            break;
+
+        default:    *state = warte_auf_start_byte;
+    }
+}
+
+
+*/
+
+
+
+
+void init_spi1(){                               // emain-sender Sender SPI-Master
+    io_out8(SPCR1, 0);                            // SPI ist Master, clock rate = 1/4,
+    io_out8(SPCR1, ((1<<SPE1) | (1<<MSTR1)));
+}
+
+
+void emain(void* arg){
+    char string[LEN];
+    USHORT buf;
+    INIT_BM_WITH_REGISTER_UI;
+
+    init_spi2(); //Initialisieren
+
+    // Zur Sicherheit vor Initialisierung den Interrupt des PIC generell deaktivieren
+        buf = io_in16(PICC);
+        buf = buf &  ~(1 << PICE);
+        io_out16(PICC, buf);
+
+        // Registrieren der ISRs in der Interupt-Vektor-Tabelle
+        setInterruptHandler(IVN_SPI2, ISR);
+
+        // Interrupt des PIV jetzt zulassen.
+        buf = buf | (1 << PICE);
+        io_out16(PICC, buf);
+
+    while(1) {
+
+#ifndef USER_PROG_2
+        putstring("Sie haben USER_PROG_2 nicht definiert\n");
+#endif
+        if (flag_ready==1){
+            putstring((char*)nachricht);
+            putstring("\n");
+
+            sprintf(string, "Akt:%d:%d:%d  Hoch:%d:%d:%d  Runter:%d:%d:%d\n", akt_zeit.hh,akt_zeit.mm,akt_zeit.ss, hoch_zeit.hh,hoch_zeit.mm,hoch_zeit.ss, runter_zeit.hh,runter_zeit.mm,runter_zeit.ss);
+            putstring(string);
+            flag_ready=0;
+        }
+    }
+}
+
+
+//################AB HIER STEHT ALLES FUER DAS SENDER-PROGRAMM #################################################
+
+void init_spi2(){ //emain Empfänger SPI-Slave
+
+//SPI ist Slave
+    io_out8(SPCR2, 0);
+    io_out8(SPCR2, ((1<<SPE2) | (1<<SPIE2)));  //zuruecksetzen und
+}
+
+
+
+
+void MasterTransmit(char cData)
+{
+    UCHAR i;
+
+
+    io_out8(SPCR1, io_in8(SPCR1) & (~(1<<notSS1)));
+
+    io_out8(SPDR1,cData);
+
+
+     while(!((io_in8(SPSR1))&(1<<SPIF1)));
+
+
+      ms_wait(10);
+
+
+
+
+    io_out8(SPCR1,(io_in8(SPCR1) | (1<<notSS1)));
+}
+
+
+/*
+void MasterTransmit(char* cData)
+{
+    UCHAR i;
+
+    for(i=0; i<= 8; i++)
+    {
+
+            io_out8(SPCR1, io_in8(SPCR1) & (~(1<<notSS1)));
+
+            io_out8(SPDR1,cData[i]);
+
+
+            while(!((io_in8(SPSR1))&(1<<SPIF1)));
+
+
+            ms_wait(10);
+
+
+
+
+        io_out8(SPCR1,(io_in8(SPCR1) | (1<<notSS1)));
+
+    }
+}
+*/
+
+void emain_sender(void* arg){
+     UCHAR i;
+     UCHAR parametriere_akt_zeit   [] = "#A000005";
+     UCHAR parametriere_hoch_zeit  [] = "#B000105";
+     UCHAR parametriere_runter_zeit[] = "#C000159";
+
+     UCHAR a = 'F';
+
+     init_spi1();
+
+     while(1) {
+         i = 0;
+
+         MasterTransmit(a);
+         a++;
+
+
+         /*
+         do{
+
+
+            if(i==0)
+            {
+                MasterTransmit(parametriere_akt_zeit);
+            }
+
+
+            if(i == 1)
+            {
+
+                MasterTransmit(parametriere_hoch_zeit);
+
+            }
+
+
+
+            if(i == 2)
+            {
+                MasterTransmit(parametriere_runter_zeit);
+
+            }
+
+
+
+
+             ms_wait(10);
+             */
+
+
+
+             i++;
+
+         } while(i<127);
+
+      }
+
+
+
+#endif //V3_Aufgabe_2
+
+
+
+ #ifdef V3_Aufgabe_3b
+
+
+typedef struct {
+    unsigned char hh;
+    unsigned char mm;
+    unsigned char ss;
+} uhrzeit;
+
+uhrzeit akt_zeit;
+uhrzeit hoch_zeit;
+uhrzeit runter_zeit;
+
+
+
+
+
+//------------------------------
+
+// Globale Variablen zur Kommunikation mit der ISR
+unsigned long int zt=0, hh=0, mm=0, ss=0;
+
+void timer1_init()
+{
+    /*	Zur Berechnung der Werte fuer den Prescaler und den Compare-Match:
+        Bei einer Frequenz von 4 Mhz zaehlt der Timer mit einem Takt von 0,25us.
+        Er kann mit seinen 65536 moeglichen Zaehlstaenden eine maximale Interrupt-Periode von 65536 * 0,25us = 16384us realisieren.
+        Dies ist zu schnell. => Der Zaheler muss mittels des Prescalers langsamer eingestellt werden.
+        Die ideale Untersetzung waere  50000us / 16384us = 3,0517.
+        Da es diese Unterssetzung (Prescaler-Wert) nicht gibt waehlen wir den naechst groesseren Wert also 8.
+        Der Zaehler zaehlt jetzt mit einem Takt vom 2us. => Die Interrupts haben bei einem Compare-Match-Wert von 65535
+        eine Periode von 131072 us.Der Compare-Match-Wert muss auf 50000us/131072us*65536us = 25000 eingestellt werden.
+    */
+
+    unsigned short buf = 0;
+
+    // TCRA1
+    // Clock Source auf intern/8 Prescaler
+    // Timer Modus Clear-Timer-On-Compare-Match
+    buf = (1 << PS11) | (1 << TM10);
+    io_out16(TCRA1, buf);
+
+    // TCRB1
+    // Counter Enable
+    buf = (1 <<CE1);
+    io_out16(TCRB1, buf);
+
+    // TIMR1
+    // Compare Match Interrupt enable
+    buf = (1 << OCIE1);
+    io_out16(TIMR1, buf);
+
+    // CMPA1
+    // Compare Match Register auf ...
+    buf = 5000; //25000;
+    io_out16(CMPA1, buf);
+
+}
+
+// Makros damit man beim Testen nicht so lange warten muss
+// Die korrekten Werte stehen als Kommentare jeweils dahinter
+#define ZT_MAXW	2   //3	//20
+#define SS_MAXW	60 //3	//60
+#define MM_MAXW	2  //3	//60
+#define HH_MAXW	1   //3	//24
+
+//	Interrupt Service Routine
+void timer1_oco1_isr()
+{
+    unsigned char stringbuf[100];
+    unsigned short int buf;
+
+    zt++;
+
+    if(zt==ZT_MAXW){
+        zt=0;
+        ss++;
+    }
+
+    if(ss==SS_MAXW){
+        ss=0;
+        mm++;
+    }
+
+    if(mm==MM_MAXW){
+        mm=0;
+        hh++;
+    }
+    if(hh==HH_MAXW){
+        hh=0;
+    }
+    akt_zeit.hh = hh;  //akt_zeit zu gewiesen
+    akt_zeit.mm = mm;
+    akt_zeit.ss = ss;
+
+    sprintf(stringbuf,"zt=%d  Uhrzeit: %d:%d:%d\n",zt,hh,mm,ss);
+    // Achtung die Verwendung von putstring() kann in der Simulationsumgebung
+    // zu einem Deadlock fuehren, d.h. alles bleibt einfach stehen.
+    // Dahr ist dies hier (zur Sicherheit) auskommentiert.
+    // putstring(stringbuf);
+
+    // Zuruecksetzen des Interrupt-Flags
+    buf = io_in16(TIFR1);
+    buf = buf & ~(1 << OCIF1);
+    io_out16(TIFR1, buf);
+
+}
+
+
+
+
+
+//--------------------------------
+
+
+/*
+    ES GELTEN DIE BEI "rollosteuerung_moore" AN GLEICHER STELLE VORANGESTELLTEN KOMMENTARE
+*/
+
+// Einige Defines zum leichteren Wiederfinden
+#define BIT_POS_IST_OBEN	0
+#define BIT_POS_IST_UNTEN	1
+#define BIT_POS_NACH_OBEN	4
+#define BIT_POS_NACH_UNTEN	5
+#define BIT_POS_FAHRE_NACH_OBEN	9
+#define BIT_POS_MOTOR_AN	8
+#define BIT_POS_FAHRE_NACH_UNTEN	10
+
+typedef enum {hoch, runter, steht} STATE;	// Datentyp für den Zustand das Automaten.
+                                            // Vergleichbar mit "TYPE .... IS" in VHDL.
+typedef unsigned short int USHORT;			// Eigener Datentyp zur Abkuerzung
+
+
+void steuerungsfunktion    (	USHORT ist_oben, USHORT ist_unten,
+                        USHORT nach_oben, USHORT nach_unten,
+                        USHORT* p_fahre_nach_oben,
+                        USHORT* p_fahre_nach_unten,
+                        STATE* p_state, USHORT nach_oben_wegen_zeit,
+                                USHORT nach_unten_wegen_zeit)
+{
+
+    // 5.)	switch-case-Konstrukt zur "Verwaltung" der Zustaende
+    switch (*p_state) {
+
+        // 6.)	Ein CASE je Zustand
+        case steht:
+
+            // 7a.)  .... Ausgabesignale bestimmen
+            *p_fahre_nach_unten=0; *p_fahre_nach_oben=0;
+
+
+
+
+
+            // 8.)    Eingabesignale auswerten und Zustandswechsel herbei fuehren
+            //         Ein IF je Pfeil
+            if (  (ist_unten == 0) && (nach_unten == 1) && (nach_oben == 0)) {
+                *p_state = runter; // Wechsel in den Zustand "runter"
+            }
+            if (  (ist_oben == 0) && (nach_oben == 1) ){
+                *p_state = hoch;  // Wechsel in den Zustand "hoch"
+            }
+
+            // Diese if-Anweisung kann entfallen, da sie cstate nicht veraendert.
+            if ( !(    ((ist_unten == 0) && (nach_unten == 1) && (nach_oben == 0))
+                    || ((ist_oben == 0) && (nach_oben == 1)) )      ) {
+                *p_state = steht; // Bleibe im Zustand "steht"
+            }
+
+
+            if(nach_oben_wegen_zeit != 0)  //nach_oben oder unten
+            {
+                *p_state = hoch;
+            }
+
+            if(nach_unten_wegen_zeit != 0)
+            {
+                *p_state = runter;
+            }
+
+
+            break;
+
+        case runter:
+
+            // 7a.)  Ausgabesignale bestimmen
+            *p_fahre_nach_unten=1; *p_fahre_nach_oben=0;
+
+
+            // 8.)    Eingabesignale auswerten und Zustandswechsel herbei fuehren
+            if (ist_unten == 1) {
+                *p_state = steht; // Wechsel in den Zustand "steht"
+            }
+
+            // Diese if-Anweisung kann entfallen, da sie cstate nicht veraendert.
+            if (ist_unten == 0) {
+                *p_state = runter; // Bleibe im Zustand "runter"
+            }
+
+
+            if(nach_oben_wegen_zeit != 0)
+            {
+                *p_state = hoch;
+            }
+
+            if(nach_unten_wegen_zeit != 0)
+            {
+                *p_state = runter;
+            }
+
+            break;
+
+        case hoch:
+
+            // 7a.)  Ausgabesignale bestimmen
+            *p_fahre_nach_unten=0; *p_fahre_nach_oben=1;
+
+            // 8.)    Eingabesignale auswerten und Zustandswechsel herbei fuehren
+            if (ist_oben == 1){
+                *p_state = steht; // Wechsel in den Zustand "steht"
+            }
+
+            // Diese if-Anweisung kann entfallen, da sie cstate nicht veraendert.
+            if (ist_oben == 0){
+                *p_state = hoch; // Bleibe im Zustand "hoch"
+            }
+
+
+            if(nach_oben_wegen_zeit != 0)
+            {
+                *p_state = hoch;
+            }
+
+            if(nach_unten_wegen_zeit != 0)
+            {
+                *p_state = runter;
+            }
+
+            break;
+
+        // 9.) nicht erlaubte Zustaende "abfangen"
+        default:
+            *p_state = runter;
+
+    } // end switch
+} // end steuerungsfunktion()
+
+
+
+
+void emain(void* arg)
+{
+
+
+
+    USHORT nach_oben_wegen_zeit = 0;  // USHORT variablen
+    USHORT nach_unten_wegen_zeit = 0;
+
+
+
+    STATE cstate;		// Variable für den Zustand das Automaten.
+
+    // Variablen für die Eingabesignale. Eine Variable fuer jedes Signal.
+    USHORT		nach_oben;
+    USHORT		nach_unten;
+    USHORT		ist_oben;
+    USHORT		ist_unten;
+
+    // Variablen für die Ausgabesignale. Eine Variable fuer jedes Signal.
+    USHORT		fahre_nach_oben;
+    USHORT		fahre_nach_unten;
+
+    USHORT		input, output, last_output;
+
+
+    INIT_BM_WITH_REGISTER_UI;	// Nur fuer Simulation
+
+    unsigned char stringbuf[100];
+    // Uhrzeiterfragen ohne weitere Ueberpruefung
+    /*putstring("Bitte die aktuelle Uhrzeit im Format hh:mm:ss eingeben\n");
+    getstring(stringbuf);
+    */sscanf(stringbuf,"%d:%d:%d",&hh, &mm, &ss);
+
+
+    // 1.)	Hardware konfigurieren
+    io_out16(DIR1, 0xFF00); // Ausgang: Bits 15 bis 8   Eingang: Bits 7 bis 0
+
+    // 2.)	 Definition des Startzustandes. Entspricht dem asynchronen Reset in VHDL.
+    cstate = runter;
+      //cstate = steht;
+
+
+
+
+      //-----------Selbst eingefügt
+
+      unsigned short buf = 0;
+
+      // Zur Sicherheit vor Initialisierung den Interupt des PIC generell deaktivieren
+      buf = io_in16(PICC);
+      buf = buf &  ~(1 << PICE);
+      io_out16(PICC, buf);
+
+      // Timer 1 initialisieren
+      timer1_init();
+
+      // ISR registrieren
+      setInterruptHandler(IVN_OC1, timer1_oco1_isr);
+//auskommentieren für 1a
+
+
+      // Interrupt des PIC jetzt zulassen
+      buf = buf | (1 << PICE);
+      io_out16(PICC, buf);
+
+//----------------------------------------
+         akt_zeit.hh = 0;
+         akt_zeit.mm = 0;
+         akt_zeit.ss = 0;
+
+         hoch_zeit.hh = 0;
+         hoch_zeit.mm = 1;
+         hoch_zeit.ss = 0;
+
+         runter_zeit.hh = 0;
+         runter_zeit.mm = 1;
+         runter_zeit.ss = 55;
+         //Auskommentiert für 1a
+
+    // 3.) Unendliche Schleife. Ein Schleifendurchlauf entspricht einem Zyklus des Automaten
+    while (1) {
+
+        SYNC_SIM; // Nur fuer Simulation
+
+
+
+        //--------------------------
+
+
+
+
+
+
+
+        if(akt_zeit.hh == hoch_zeit.hh && akt_zeit.mm == hoch_zeit.mm && akt_zeit.ss == hoch_zeit.ss)
+        {
+            nach_oben_wegen_zeit =1;
+        }
+        else
+        {
+            nach_oben_wegen_zeit = 0;
+        }
+
+        if(akt_zeit.hh == runter_zeit.hh && akt_zeit.mm == runter_zeit.mm && akt_zeit.ss == runter_zeit.ss)
+        {
+            nach_unten_wegen_zeit = 1;
+
+
+
+        }
+        else
+        {
+            nach_unten_wegen_zeit = 0;
+        }
+
+        //-------------------------------
+
+
+
+        // 4.)	Einlesen der Eingabesignale einmal je Zyklus
+        input = io_in16(IN1);
+
+        // extrahieren von "ist_oben" (BIT_POS_IST_OBEN)
+        ist_oben = (input >> BIT_POS_IST_OBEN) & 0x01;
+
+        // extrahieren von "ist_unten" (BIT_POS_IST_UNTEN)
+        ist_unten = (input >> BIT_POS_IST_UNTEN) & 0x01;
+
+        // extrahieren von "nach_oben" (BIT_POS_NACH_OBEN)
+        nach_oben = (input >> BIT_POS_NACH_OBEN) & 0x01;
+
+        // extrahieren von "nach_unten" (BIT_POS_NACH_UNTEN)
+        nach_unten = (input >> BIT_POS_NACH_UNTEN) & 0x01;
+
+        // Aufruf der Steuerungsfunktion
+        steuerungsfunktion    (	ist_oben, ist_unten, nach_oben, nach_unten,
+                            &fahre_nach_oben, &fahre_nach_unten, &cstate,
+                                nach_oben_wegen_zeit, nach_unten_wegen_zeit);
+
+
+
+        //------------------------------
+
+
+
+
+        //-------------------------
+
+        // 7b.) Ausgabesignale ausgeben
+        output=fahre_nach_unten<<BIT_POS_FAHRE_NACH_UNTEN;
+        output=output | (fahre_nach_oben<< BIT_POS_FAHRE_NACH_OBEN);
+
+
+        // Nur wirklich ausgeben wenn notwendig
+        // Optimierung mittels bedigter Portausgabe
+        if (last_output != output) {
+            output=output | (1<< BIT_POS_MOTOR_AN);   // Nur fuer Bandmodell
+            io_out16(OUT1, io_in16(OUT1) & 0x00FF);
+            io_out16(OUT1, io_in16(OUT1) |  output);
+            last_output = output;
+        }
+    } // end while
+} // end main
+#endif // V3_Aufgabe_1
+
+#ifdef V3_Aufgabe_3b
+#include "user_conf.h"
+#define LEN 300
+#define COM_SIGNAl_PIN				0		// Pin ueber den der Interrupts ausgeloest wird
+#define COM_DATA_IN_REGISTER		IN0		// Register ueber den das Byte eingelesen wird
+#define MAX_MESSAGE_SIZE			100		// Maximale Laenge einer Nachricht
+#define STARTBYTE					0x23	// Wert des Start-Bytes #
+#define ENDBYTE						0    	// Wert des Ende-Bytes /0
+#define READ                        0x00FF
+
+
+typedef struct {UCHAR hh, mm, ss;} uhrzeit;
+
+typedef enum {warte_auf_start_byte, warte_auf_end_byte} STATE_N;
+
+UCHAR		nachricht[MAX_MESSAGE_SIZE];
+UCHAR		flag_ready;
+STATE_N		comstate=warte_auf_start_byte;
+ULONG       byte_counter;
+
+
+uhrzeit     akt_zeit, hoch_zeit, runter_zeit;
+
+void do_param(UCHAR* auszuwertende_nachricht, uhrzeit* akt, uhrzeit* hoch, uhrzeit* runter){
+
+
+UCHAR i;
+unsigned short stunde = 0;
+unsigned short minute = 0;
+unsigned short sekunde = 0;
+
+
+// Umwandeln von hex in dezimal
+
+
+    switch (auszuwertende_nachricht[1]){
+
+    case 'A':
+            i = 0;
+            stunde = 10*(auszuwertende_nachricht[i+2]-0x30);
+            stunde = stunde + (auszuwertende_nachricht[i+3]-0x30);
+
+            minute = 10* (auszuwertende_nachricht[i+4]-0x30);
+            minute = minute + (auszuwertende_nachricht[i+5]-0x30);
+
+            sekunde = 10*(auszuwertende_nachricht[i+6]-0x30);
+            sekunde  = sekunde + (auszuwertende_nachricht[i+7]-0x30);
+
+            akt->hh = stunde;
+            akt->mm = minute;
+            akt->ss = sekunde;
+
+         break;
+
+    case 'B':
+            i = 0;
+            stunde = 10*(auszuwertende_nachricht[i+2]-0x30);
+            stunde = stunde + (auszuwertende_nachricht[i+3]-0x30);
+
+            minute = 10* (auszuwertende_nachricht[i+4]-0x30);
+            minute = minute + (auszuwertende_nachricht[i+5]-0x30);
+
+            sekunde = 10*(auszuwertende_nachricht[i+6]-0x30);
+            sekunde  = sekunde + (auszuwertende_nachricht[i+7]-0x30);
+
+            hoch->hh = stunde;
+            hoch->mm = minute;
+            hoch->ss = sekunde;
+        break;
+
+    case 'C':
+            i = 0;
+            stunde = 10*(auszuwertende_nachricht[i+2]-0x30);
+            stunde = stunde + (auszuwertende_nachricht[i+3]-0x30);
+
+            minute = 10* (auszuwertende_nachricht[i+4]-0x30);
+            minute = minute + (auszuwertende_nachricht[i+5]-0x30);
+
+            sekunde = 10*(auszuwertende_nachricht[i+6]-0x30);
+            sekunde  = sekunde + (auszuwertende_nachricht[i+7]-0x30);
+
+            runter->hh = stunde;
+            runter->mm = minute;
+            runter->ss = sekunde;
+        break;
+
+    }
+}
+
+void ISR(){
+    USHORT hilfe = 0;
+    UCHAR buf;
+    buf=(UCHAR) (io_in8(SPDR2) & 0x00FF);       //Byte_received                                          // Einlesen des Datenbytes in Slave
+    steuerungsfunktion(buf, &byte_counter, &(nachricht[0]), &flag_ready, &comstate);    // Aufruf der Steuerungsfunktion
+
+    hilfe = io_in8(SPSR2) & (~(1<<SPIF2));                                              // Zureucksetzen des Interrupt-Flags
+
+    io_out8(SPSR2, hilfe);
+    /*if(flag_ready == 1){
+        do_param(nachricht, &akt_zeit, &hoch_zeit, &runter_zeit);
+    }*/
+    return;
+}
+
+
+
+void steuerungsfunktion(UCHAR byte_received, ULONG* byte_zaehler, UCHAR* empfangene_nachricht, UCHAR* ready, STATE_N* state){
+
+    switch (*state) {
+
+        case warte_auf_start_byte:
+
+            if ( byte_received == STARTBYTE) {                      // Uebergang nach warte_auf_end_byte
+                *byte_zaehler = 0;                                    // Etwas tun am Uebergang.
+                empfangene_nachricht[*byte_zaehler]=byte_received;
+                *byte_zaehler=*byte_zaehler+1;
+                *state = warte_auf_end_byte;                        // Zustandswechsel
+
+            }
+            break;
+
+        case warte_auf_end_byte:
+            if (byte_received == ENDBYTE)  {                        // Uebergang nach warte_auf_start_byte
+
+                empfangene_nachricht[*byte_zaehler]=byte_received;
+                *byte_zaehler=*byte_zaehler+1;
+                *ready=1;
+                *state = warte_auf_start_byte;
+
+                do_param(nachricht, &akt_zeit, &hoch_zeit, &runter_zeit); //do_param aufrufen
+
+
+            }
+
+            if (*byte_zaehler == MAX_MESSAGE_SIZE-1) {
+                    *state = warte_auf_start_byte;                  // Die Nachricht ist zu lang und kann daher nicht gueltig sein!
+            }
+
+            if (byte_received == STARTBYTE) {                       // Uebergang auf sich selbst nur damit etwas getan wird.
+                *byte_zaehler=0;
+                empfangene_nachricht[*byte_zaehler]=byte_received;
+                *byte_zaehler=*byte_zaehler+1;
+                *state = warte_auf_end_byte;                        // Ist ueberfluessing dient aber hoffentlich
+                                                                    // dem Verstaendnis
+            }
+
+            if ((byte_received != STARTBYTE) && (byte_received != ENDBYTE)
+                && (*byte_zaehler < MAX_MESSAGE_SIZE-1)) {
+                empfangene_nachricht[*byte_zaehler]=byte_received;
+                *byte_zaehler=*byte_zaehler+1;
+                *state = warte_auf_end_byte;
+            }
+
+            break;
+
+        default:    *state = warte_auf_start_byte;
+    }
+}
+
+
+
+void init_spi1(){                               // emain-sender Sender SPI-Master
+    io_out8(SPCR1, 0);                            // SPI ist Master, clock rate = 1/4,
+    io_out8(SPCR1, ((1<<SPE1) | (1<<MSTR1)));
+}
+
+
+void emain(void* arg){
+    char string[LEN];
+    USHORT buf;
+    INIT_BM_WITH_REGISTER_UI;
+
+    init_spi2(); //Initialisieren
+
+    // Zur Sicherheit vor Initialisierung den Interrupt des PIC generell deaktivieren
+        buf = io_in16(PICC);
+        buf = buf &  ~(1 << PICE);
+        io_out16(PICC, buf);
+
+        // Registrieren der ISRs in der Interupt-Vektor-Tabelle
+        setInterruptHandler(IVN_SPI2, ISR);
+
+        // Interrupt des PIV jetzt zulassen.
+        buf = buf | (1 << PICE);
+        io_out16(PICC, buf);
+
+    while(1) {
+
+#ifndef USER_PROG_2
+        putstring("Sie haben USER_PROG_2 nicht definiert\n");
+#endif
+        if (flag_ready==1){
+            putstring((char*)nachricht);
+            putstring("\n");
+
+            sprintf(string, "Akt:%d:%d:%d  Hoch:%d:%d:%d  Runter:%d:%d:%d\n", akt_zeit.hh,akt_zeit.mm,akt_zeit.ss, hoch_zeit.hh,hoch_zeit.mm,hoch_zeit.ss, runter_zeit.hh,runter_zeit.mm,runter_zeit.ss);
+            putstring(string);
+            flag_ready=0;
+        }
+    }
+}
+
+
+//################AB HIER STEHT ALLES FUER DAS SENDER-PROGRAMM #################################################
+
+void init_spi2(){ //emain Empfänger SPI-Slave
+
+//SPI ist Slave
+    io_out8(SPCR2, 0);
+    io_out8(SPCR2, ((1<<SPE2) | (1<<SPIE2)));  //zuruecksetzen und
+}
+
+void MasterTransmit(char* cData)
+{
+    UCHAR i;
+
+    for(i=0; i<= 8; i++)
+    {
+
+            io_out8(SPCR1, io_in8(SPCR1) & (~(1<<notSS1)));
+
+            io_out8(SPDR1,cData[i]);
+            while(!((io_in8(SPSR1))&(1<<SPIF1)));
+            ms_wait(10);
+
+
+
+
+        io_out8(SPCR1,(io_in8(SPCR1) | (1<<notSS1)));
+
+    }
+}
+
+
+void emain_sender(void* arg){
+     UCHAR i;
+     UCHAR parametriere_akt_zeit   [] = "#A000005";
+     UCHAR parametriere_hoch_zeit  [] = "#B000105";
+     UCHAR parametriere_runter_zeit[] = "#C000159";
+
+     init_spi1();
+
+     while(1) {
+         i = 0;
+         do{
+
+            if(i==0){ MasterTransmit(parametriere_akt_zeit);   }
+            if(i == 1){ MasterTransmit(parametriere_hoch_zeit);   }
+            if(i == 2){  MasterTransmit(parametriere_runter_zeit);   }
+
+             ms_wait(10);
+
+
+
+             i++;
+
+         } while(i<127);
+
+      }
+
+
+}
+#endif //V3_Aufgabe_3b
